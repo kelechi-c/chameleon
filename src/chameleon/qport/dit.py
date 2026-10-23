@@ -63,6 +63,7 @@ class Hooks:
     ref: tp.Callable[[int, Tensor], Tensor] | None = None
     target: tp.Callable[[int, int, Tensor], Tensor] | None = None
     ref_window: tuple[int, int] | None = None  # target rows see the reference keys only in blocks lo..hi (inclusive)
+    window_last: bool = False  # the window applies to the last reference image only (edit: the style ref, not the photo)
 
 
 def rope_table(index: Tensor, dim: int, theta: float = 10000.0) -> Tensor:
@@ -135,7 +136,11 @@ def ref_mask(hooks: Hooks, block: int, lay: Layout, device: torch.device) -> Ten
     if w is None or w[0] <= block <= w[1]:
         return None
     m = torch.ones(lay.image.numel(), dtype=torch.bool, device=device)
-    m[lay.ref_idx] = False
+    if hooks.window_last:
+        a, b, _ = [s for s in lay.segments if not s[2]][-1]
+        m[a:b] = False
+    else:
+        m[lay.ref_idx] = False
     return m
 
 
