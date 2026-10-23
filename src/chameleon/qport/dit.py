@@ -62,6 +62,7 @@ class Hooks:
 
     ref: tp.Callable[[int, Tensor], Tensor] | None = None
     target: tp.Callable[[int, int, Tensor], Tensor] | None = None
+    ref_window: tuple[int, int] | None = None  # target rows see the reference keys only in blocks lo..hi (inclusive)
 
 
 def rope_table(index: Tensor, dim: int, theta: float = 10000.0) -> Tensor:
@@ -126,6 +127,16 @@ def source_layout(n_text: int, shape: tuple[int, int], cfg: DitConfig, device: t
     prefix = image.numel()
     return Layout(torch.ones(0, dtype=torch.long, device=device), image, prefix,
                   _runs(image, [shape[0] * shape[1]], prefix), _rope(image, [shape], cfg))
+
+
+def ref_mask(hooks: Hooks, block: int, lay: Layout, device: torch.device) -> Tensor | None:
+    """Keys the target rows may attend to in this block: all but the reference tokens outside hooks.ref_window."""
+    w = hooks.ref_window
+    if w is None or w[0] <= block <= w[1]:
+        return None
+    m = torch.ones(lay.image.numel(), dtype=torch.bool, device=device)
+    m[lay.ref_idx] = False
+    return m
 
 
 def rms(x: Tensor, weight: Tensor, eps: float) -> Tensor:
@@ -215,22 +226,25 @@ class Block(nn.Module):
         """The mlp branch with its residual."""
         return x + mod[3] * self.img_mlp(self._norm(x, mod[2]))
 
-    def prefill(self, x: Tensor, mod: Mod, lay: Layout) -> tuple[Tensor, KV]:
-        """Whole joint sequence; returns the stream and this layer's keys and values (prefix rows = the cache)."""
+    def prefill(self, x: Tensor, mod: Mod, lay: Layout, kmask: Tensor | None = None) -> tuple[Tensor, KV]:
+        """Whole joint sequence; returns the stream and this layer's keys and values (prefix rows = the cache).
+        kmask (S,) bool: keys the target rows may attend to (None = all)."""
         q, k, v = self.attn.qkv(self._norm(x, mod[0]), lay.rope)
         att = attend_prefix(q, k, v, lay)
         if lay.prefix < x.shape[1]:
-            att = torch.cat([att, sdpa(q[:, lay.prefix:], k, v)], dim=1)
+            att = torch.cat([att, sdpa(q[:, lay.prefix:], k, v, None if kmask is None else kmask[None, None, None])],
+                            dim=1)
         x = x + mod[1] * self.attn.to_out[0](att.flatten(2))
         return self._mlp(x, mod), (k, v)
 
-    def decode(self, x: Tensor, mod: Mod, rope: Tensor, cache: KV) -> Tensor:
-        """Target rows only: write their keys and values into the cache tail, attend to [prefix, target] unmasked."""
+    def decode(self, x: Tensor, mod: Mod, rope: Tensor, cache: KV, kmask: Tensor | None = None) -> Tensor:
+        """Target rows only: write their keys and values into the cache tail, attend to [prefix, target] (all, or the
+        keys in kmask)."""
         k, v = cache
         rows = x.shape[1]
         q, k_new, v_new = self.attn.qkv(self._norm(x, mod[0]), rope)
         k[:, -rows:], v[:, -rows:] = k_new, v_new
-        x = x + mod[1] * self.attn.to_out[0](sdpa(q, k, v).flatten(2))
+        x = x + mod[1] * self.attn.to_out[0](sdpa(q, k, v, None if kmask is None else kmask[None, None, None]).flatten(2))
         return self._mlp(x, mod)
 
 
@@ -305,7 +319,7 @@ class Dit(nn.Module):
                 x[:, ref] = hooks.ref(i, x[:, ref])
             if hooks.target is not None:
                 x[:, lay.prefix:] = hooks.target(i, 0, x[:, lay.prefix:])
-            x, kv = block.prefill(x, mod, lay)
+            x, kv = block.prefill(x, mod, lay, ref_mask(hooks, i, lay, x.device))
             cache.append(kv)
         return self.head(x[:, lay.prefix:], final[:, lay.prefix:]), cache
 
@@ -319,7 +333,7 @@ class Dit(nn.Module):
         for i, (block, kv) in enumerate(zip(self.transformer_blocks, cache)):
             if hooks.target is not None:
                 x = hooks.target(i, step, x)
-            x = block.decode(x, mod, rope, kv)
+            x = block.decode(x, mod, rope, kv, ref_mask(hooks, i, lay, x.device))
         return self.head(x, final)
 
     def source(self, refs: Tensor, prefix_text: Tensor, lay: Layout, blocks: tp.Sequence[int]) -> dict[int, Tensor]:
