@@ -4,3 +4,9 @@ __pycache__/
 *.pt
 *.npy
 .venv/
+# private: run orchestration and agent notes
+tools/
+AGENTS.md
+logs.txt
+*-ideas.md
+.ipynb_checkpoints/

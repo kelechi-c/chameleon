@@ -1,0 +1,11 @@
+torch>=2.8
+torchvision
+git+https://github.com/huggingface/diffusers@85c9fa4caee33d1c5b473395784471d2d7957c1b
+transformers==5.19.0
+accelerate
+safetensors
+sentencepiece
+huggingface_hub
+numpy
+pillow
+spaces
