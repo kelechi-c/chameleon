@@ -1,9 +1,9 @@
 """Chameleon inference for apps (the hugging face space in space/, notebooks): style cartridges from images, random or
 mixed codes, rendered as describer text or soft tokens for qwen-image 2.1 turbo, t2i and photo edits, and the optional
-texture boost (the reference's vae latents visible to the target only in blocks 12-19; qimg_decouple2 / _edit).
+texture boost (the reference's vae latents visible to the target only in blocks 12-19).
 
 every model resident on one gpu (>= 40 gb, or zerogpu), else swapped per phase: the vl encoder and the dit (16 + 13 gb)
-take turns on the gpu, the small parts (style backbone, head, klein embeddings) stay.
+take turns on the gpu, the small parts (style backbone, head, qwen3 embeddings) stay.
 """
 
 import gc
@@ -13,14 +13,14 @@ import torch
 from PIL import Image
 
 from chameleon import cartridge as cg
-from chameleon import klein, qimg, style
+from chameleon import qimg, style
 from chameleon.qport import model as qm
 from chameleon.qport.dit import Hooks
 
 TAU: float = 1.5
-INSTR: str = "Change the style of this image to:"  # = scripts/cartridge.py
+INSTR: str = "Change the style of this image to:"
 NEUTRAL: str = "Change the style of this image."
-T2I: str = "{p}, in the visual style of <image1> (its colours, medium, texture and lighting), not its content."  # qimg_ref
+T2I: str = "{p}, in the visual style of <image1> (its colours, medium, texture and lighting), not its content."
 EDIT: str = ("Redraw <image1> in the visual style of <image2>: its colours, medium, texture and lighting. Keep the "
              "content and composition of <image1>; take nothing else from <image2>.")
 WINDOW: tuple[int, int] = (12, 19)
@@ -38,17 +38,17 @@ def square(im: Image.Image, side: int) -> Image.Image:
 class Pipeline:
     """All of chameleon's inference models; `resident=None` decides from the gpu's memory."""
 
-    def __init__(self, head: str, prior: str | None, resident: bool | None = None, head_name: str = "r6c") -> None:
-        """prior: the head's random-code prior (code_prior.pt), or None for a head without one (r7): no random()."""
+    def __init__(self, head: str, prior: str | None, resident: bool | None = None, head_name: str = "chameleon-ar-head") -> None:
+        """prior: the head's random-code prior (code_prior.pt), or None for a head without one: no random()."""
         if resident is None:
             resident = torch.cuda.get_device_properties(0).total_memory >= 40 * 2**30
         self.resident, self.head_name = resident, head_name
         self.head = style.load_head(head)
         self.bb = style.load_backbone()
-        self.e4 = qimg.klein_embeddings()
         self.prior = cg.Prior.load(prior) if prior else None
         self.enc, self.proc = qm.load_encoder()
         self.evl = getattr(self.enc.model, "language_model", self.enc.model).embed_tokens.weight
+        self.e4 = self.table(self.head)  # the table the head writes through
         self.eos = self.proc.tokenizer.convert_tokens_to_ids("<|endoftext|>")
         if not resident:
             self.enc.to("cpu")
@@ -75,6 +75,10 @@ class Pipeline:
         self.on = which
 
     # ------------------------------------------------------------------------------------------------ cartridges
+    def table(self, head: tp.Any) -> torch.Tensor:
+        """The token-embedding table a head was trained with: Qwen-Image's own text encoder (4096-d) or Qwen3-4B's."""
+        return self.evl.detach().clone() if head.cfg.d_out == self.evl.shape[1] else qimg.qwen3_embeddings()
+
     def make(self, images: list[Image.Image], names: list[str] | None = None) -> cg.Cartridge:
         names = names or [f"ref{i}" for i in range(len(images))]
         return cg.make(self.head, self.bb, [im.convert("RGB") for im in images], names, self.head_name)
@@ -106,7 +110,7 @@ class Pipeline:
         for i, p in enumerate(prompts):
             if plain:
                 if render == "soft":
-                    t = qimg.encode_soft(self.enc, self.proc, f"{p}." + klein.PLACE * len(soft), soft)
+                    t = qimg.encode_soft(self.enc, self.proc, f"{p}." + qimg.PLACE * len(soft), soft)
                 else:
                     t = enc(f"{p}.{said}")
                 jobs.append((p, "t2i", i, t))
@@ -116,7 +120,7 @@ class Pipeline:
         for i, ph in enumerate(photos):
             if plain:
                 if render == "soft":
-                    t = qimg.encode_soft(self.enc, self.proc, INSTR + klein.PLACE * len(soft), soft, [ph])
+                    t = qimg.encode_soft(self.enc, self.proc, INSTR + qimg.PLACE * len(soft), soft, [ph])
                 else:
                     t = enc(INSTR + said, [ph])
                 jobs.append((f"photo {i + 1}", "edit", i, t))
@@ -148,8 +152,8 @@ class Pipeline:
 
     @torch.no_grad()
     def window(self, text: qm.Text, refs: list[tuple[torch.Tensor, tuple[int, int]]], seed: int) -> Image.Image:
-        """Turbo generation with the last reference visible to the target only in WINDOW (qimg_decouple2.generate /
-        qimg_decouple_edit.generate without late entry): t2i refs = [style ref]; edit refs = [photo, style ref]."""
+        """Turbo generation with the last reference visible to the target only in WINDOW: t2i refs = [style ref];
+        edit refs = [photo, style ref]."""
         states, slots = text
         dit = self.core.dit
         sig = torch.tensor([*qm.TURBO, 0.0], device=qm.DEV)

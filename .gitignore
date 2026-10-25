@@ -1,12 +1,20 @@
-runs/
+# public: the readme, the qwen-image pipeline (src), the training script, the notebook and the space; all else private
+/*
+!/README.md
+!/.gitignore
+!/src/
+!/scripts/
+!/notebooks/
+!/space/
+/scripts/*
+!/scripts/train_head.py
+/src/chameleon/klein.py
+/src/chameleon/qtok.py
+/src/chameleon/judges.py
+/src/chameleon/lora.py
+/src/chameleon/legacy.py
 __pycache__/
 *.pyc
 *.pt
 *.npy
-.venv/
-# private: run orchestration and agent notes
-tools/
-AGENTS.md
-logs.txt
-*-ideas.md
 .ipynb_checkpoints/

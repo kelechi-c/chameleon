@@ -1,13 +1,11 @@
-"""Style backbone (frozen) and the trainable style head.
+"""Style backbone (frozen) and the describer head.
 
 backbone: megastyle-encoder (Gaojunyao/MegaStyle, siglip-so400m-patch14-384 fine-tuned with style-supervised
 contrastive learning). features per image: the attention-pooled 1152-d embedding and a 4x4 average-pooled grid of
 the last patch tokens (16 x 1152).
 
-head: pooled feature -> gaussian posterior (mu, logvar) over a d_z code -> transformer decoder -> n_tok tokens in
-the text-encoder output space. outputs are parametrised as text_mean + text_std * o with text_mean = the mean pad
-state, so o = 0 is a near no-op token and the head works in normalised units whatever the channel scales. a cartridge is the
-posterior mean z; tokens are a pure function of z (and the optional grid).
+head: pooled feature -> gaussian posterior (mu, logvar) over a d_z code z -> a small causal transformer that writes
+the style out as text through Qwen3's vocabulary. a cartridge is the posterior mean z.
 """
 
 import dataclasses as dc
@@ -89,51 +87,9 @@ class HeadCfg:
                             # token step size is set by this gain (1.0 gave ~0.08 std per channel per step: r0-r2)
 
 
-class StyleHead(nn.Module):
-    """Pooled style feature -> posterior over z -> n_tok conditioning tokens (see module docstring)."""
-
-    def __init__(self, cfg: HeadCfg, text_mean: Tensor, text_std: Tensor) -> None:
-        super().__init__()
-        self.cfg = cfg
-        d = cfg.width
-        self.enc = nn.Sequential(nn.LayerNorm(cfg.d_in), nn.Linear(cfg.d_in, d), nn.GELU(), nn.Linear(d, 2 * cfg.d_z))
-        self.grid_in = nn.Sequential(nn.LayerNorm(cfg.d_in), nn.Linear(cfg.d_in, d)) if cfg.grid else None
-        self.z_in = nn.Linear(cfg.d_z, d)
-        self.q = nn.Parameter(torch.randn(cfg.n_tok, d) * 0.02)
-        layer = nn.TransformerEncoderLayer(d, cfg.heads, 4 * d, dropout=0.0, activation="gelu", batch_first=True,
-                                           norm_first=True)
-        self.body = nn.TransformerEncoder(layer, cfg.depth, enable_nested_tensor=False)
-        self.norm = nn.LayerNorm(d)
-        self.out = nn.Linear(d, cfg.d_out)
-        nn.init.zeros_(self.out.weight)
-        nn.init.zeros_(self.out.bias)
-        self.null = nn.Parameter(torch.zeros(cfg.n_tok, cfg.d_out))
-        self.gain = nn.Parameter(torch.ones(cfg.n_tok, cfg.d_out))  # scales the style-specific part (stage b)
-        self.register_buffer("text_mean", text_mean.float().clone())
-        self.register_buffer("text_std", text_std.float().clone())
-
-    def posterior(self, pooled: Tensor) -> tuple[Tensor, Tensor]:
-        """(mu, logvar), each (..., d_z)."""
-        mu, logvar = self.enc(pooled).chunk(2, dim=-1)
-        return mu, logvar.clamp(-8.0, 4.0)
-
-    def tokens(self, z: Tensor, grid: Tensor | None = None) -> Tensor:
-        """(B, d_z) codes (+ (B, 16, d_in) grid) -> (B, n_tok, d_out) tokens in text-state units."""
-        x = self.q[None] + self.z_in(z)[:, None]
-        if self.grid_in is not None and grid is not None:
-            x = torch.cat([self.grid_in(grid), x], dim=1)
-        h = self.body(x)[:, -self.cfg.n_tok:]
-        o = F.linear(self.norm(h), self.out.weight) * self.gain + self.out.bias
-        return self.text_mean + self.text_std * self.cfg.out_scale * o
-
-    def null_tokens(self, b: int) -> Tensor:
-        """(b, n_tok, d_out) learned 'no style' tokens."""
-        return (self.text_mean + self.text_std * self.null).expand(b, self.cfg.n_tok, -1)
-
-
 class StyleDescriber(nn.Module):
     """Autoregressive "describer": posterior over z (as StyleHead) -> n_mem memory tokens -> causal transformer that
-    writes the style text, reading and writing tokens through the frozen qwen3 input-embedding matrix E (passed in,
+    writes the style text, reading and writing tokens through the frozen Qwen3-4B input-embedding matrix E (passed in,
     not stored). fixes the position misalignment of the non-autoregressive vocab head. soft tokens are
     softmax(logits / tau) @ E along the greedy path (tau 0 = the generated text itself); z stays the cartridge."""
 
@@ -204,25 +160,12 @@ def pool_posterior(mu: Tensor, logvar: Tensor, mask: Tensor, weights: Tensor | N
     return m, var.log()
 
 
-def kl(mu: Tensor, logvar: Tensor) -> Tensor:
-    """Mean over the batch of KL(N(mu, var) || N(0, 1)) summed over dims."""
-    return 0.5 * (mu.pow(2) + logvar.exp() - 1.0 - logvar).sum(-1).mean()
-
-
-def text_stats(states: Tensor, mask: Tensor) -> tuple[Tensor, Tensor]:
-    """Token origin and scale for the head: per-channel mean of *pad* states (klein always sees prompts padded to 512,
-    so a pad-like token is close to a no-op) and per-channel std of real prompt tokens. states (B, L, D), mask (B, L)."""
-    m = mask.bool()
-    return states[~m].float().mean(0), states[m].float().std(0).clamp_min(1e-3)
-
-
 def load_head(path: str, dev: str = "cuda") -> nn.Module:
-    """Rebuild a StyleHead / StyleDescriber from a checkpoint (shapes of the text-stat buffers from the checkpoint)."""
+    """Rebuild the describer from a checkpoint (head_pre.pt)."""
     ck = torch.load(path, map_location=dev, weights_only=False)
     cfg = HeadCfg(**ck["cfg"])
+    assert cfg.space == "ar", f"not a describer head: space {cfg.space}"
     sd = ck["head"]
-    cls = StyleDescriber if cfg.space == "ar" else StyleHead
-    head = cls(cfg, torch.zeros_like(sd["text_mean"]), torch.ones_like(sd["text_std"])).to(dev)
-    miss, extra = head.load_state_dict(sd, strict=False)
-    assert set(miss) <= {"gain"} and not extra, (miss, extra)  # heads saved before the gain existed
+    head = StyleDescriber(cfg, torch.zeros_like(sd["text_mean"]), torch.ones_like(sd["text_std"])).to(dev)
+    head.load_state_dict(sd)
     return head.eval()

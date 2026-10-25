@@ -11,25 +11,24 @@ import typing as tp
 import torch
 from torch import Tensor
 
-from chameleon import klein
 from chameleon.qport import model as qm
 
-KLEIN_TE: str = "black-forest-labs/FLUX.2-klein-base-4B"
+QWEN3: str = "Qwen/Qwen3-4B"
+PLACE: str = "<|vision_pad|>"  # placeholder token whose input embedding is replaced by a soft style token
 
 
-def klein_embeddings(dev: str = "cuda") -> Tensor:
-    """Klein's qwen3-4b input-embedding matrix (151936, 2560) alone, read from its safetensors (the describer decodes
-    through it); no transformer weights are loaded."""
-    from huggingface_hub import snapshot_download
+def qwen3_embeddings(dev: str = "cuda") -> Tensor:
+    """Qwen3-4B's input-embedding matrix (151936, 2560) alone (the describer reads and writes text through it); only
+    the safetensors file holding it is downloaded."""
+    import json
+
+    from huggingface_hub import hf_hub_download
     from safetensors import safe_open
 
-    snap = pl.Path(snapshot_download(KLEIN_TE, allow_patterns=["text_encoder/*"]))
-    for f in sorted((snap / "text_encoder").glob("*.safetensors")):
-        with safe_open(f, framework="pt") as h:
-            for key in h.keys():
-                if key.endswith("embed_tokens.weight"):
-                    return h.get_tensor(key).to(dev, torch.bfloat16)
-    raise KeyError("embed_tokens.weight not found in klein's text encoder")
+    key = "model.embed_tokens.weight"
+    index = json.loads(pl.Path(hf_hub_download(QWEN3, "model.safetensors.index.json")).read_text())
+    with safe_open(hf_hub_download(QWEN3, index["weight_map"][key]), framework="pt") as h:
+        return h.get_tensor(key).to(dev, torch.bfloat16)
 
 
 @torch.no_grad()
@@ -49,7 +48,7 @@ def encode_soft(encoder: tp.Any, processor: tp.Any, prompt: str, soft: Tensor | 
     lm = getattr(encoder.model, "language_model", encoder.model)
     emb = lm.embed_tokens(ids)
     if soft is not None:
-        pos = ids[0] == processor.tokenizer.convert_tokens_to_ids(klein.PLACE)
+        pos = ids[0] == processor.tokenizer.convert_tokens_to_ids(PLACE)
         assert int(pos.sum()) == soft.shape[0], "placeholder count != soft tokens"
         emb = emb.clone()
         emb[0, pos] = soft.to(emb.dtype)

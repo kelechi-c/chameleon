@@ -1,6 +1,6 @@
 """chameleon: style cartridges for Qwen-Image 2.1 Turbo (hugging face space). chameleon.serve does the work; this file is
-the ui. the head and prior ship in weights/ (the space is private while the project is). the colab notebook
-launches the same ui with a share link (CHAMELEON_DEFER=1, then app.PIPE = its pipeline)."""
+the ui. the describer head is downloaded from the hub (HEAD_REPO); a code_prior.pt in that repo enables random styles.
+CHAMELEON_DEFER=1 skips loading, for a caller that sets app.PIPE itself."""
 
 import os
 import pathlib as pl
@@ -23,14 +23,20 @@ except ImportError:  # not on a space
     def gpu(f):  # noqa: D103
         return f
 
-W = pl.Path(__file__).parent / "weights"
+HEAD_REPO = os.environ.get("CHAMELEON_HEAD", "tensorkelechi/chameleon-ar-head")
 ZERO = bool(os.environ.get("SPACES_ZERO_GPU"))
 PIPE, WHY = None, ""
 if os.environ.get("CHAMELEON_DEFER"):  # the caller sets app.PIPE (the colab notebook reuses its pipeline)
     pass
 elif ZERO or torch.cuda.is_available():
     try:
-        PIPE = serve.Pipeline(str(W / "head_pre.pt"), str(W / "code_prior.pt"), resident=True if ZERO else None)
+        from huggingface_hub import hf_hub_download
+        try:
+            prior = hf_hub_download(HEAD_REPO, "code_prior.pt")
+        except Exception:  # noqa: BLE001 - a head without a random-style prior
+            prior = None
+        PIPE = serve.Pipeline(hf_hub_download(HEAD_REPO, "head_pre.pt"), prior, resident=True if ZERO else None,
+                              head_name=HEAD_REPO.split("/")[-1])
     except Exception:  # noqa: BLE001 - shown in the ui instead of a crashed space
         WHY = traceback.format_exc(limit=3)
 else:
@@ -86,7 +92,8 @@ with gr.Blocks(title="chameleon") as demo:
         gr.Markdown(f"> ⚠️ {WHY}")
     with gr.Row():
         with gr.Column(scale=1):
-            source = gr.Radio(["my images", "random style", "cartridge file(s)"], value="my images", label="style from")
+            sources = ["my images", "cartridge file(s)"] + (["random style"] if PIPE is not None and PIPE.prior else [])
+            source = gr.Radio(sources, value="my images", label="style from")
             refs = gr.File(file_count="multiple", file_types=["image"], label="style images (1–4, pooled into one style)")
             carts = gr.File(file_count="multiple", file_types=[".cart"], label=".cart file(s): two are mixed",
                             visible=False)

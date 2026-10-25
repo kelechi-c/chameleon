@@ -13,8 +13,9 @@ license_name: research-only
 short_description: Style cartridges for Qwen-Image (a home-made --sref)
 models:
   - Qwen/Qwen-Image-2.1-Turbo
-  - black-forest-labs/FLUX.2-klein-base-4B
+  - tensorkelechi/chameleon-ar-head
   - Gaojunyao/MegaStyle
+  - Qwen/Qwen3-4B
 ---
 
 # chameleon
@@ -26,5 +27,5 @@ only in DiT blocks 12–19.
 
 - Hardware: a GPU with at least 24 GB (L4, L40S or A100), or ZeroGPU. On a GPU under 40 GB, the VL encoder and
   the DiT take turns on the GPU.
-- Weights: `weights/head_pre.pt` (the r6c describer head) and `weights/code_prior.pt` (the random-style prior). The
-  head was trained on MegaStyle-1.4M, so use it for research and non-commercial work only.
+- Weights: the describer head is downloaded from `tensorkelechi/chameleon-ar-head`. It was trained on MegaStyle-1.4M,
+  so use it for research and non-commercial work only.

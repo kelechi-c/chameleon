@@ -1,10 +1,10 @@
 """MegaStyle feature caches and the same-style / different-content pair sampler.
 
-a cache dir (written by scripts/prep.py) holds, for N rows of one parquet shard:
+a cache dir (written by scripts/train_head.py features) holds, for N rows of one parquet shard:
   rows.jsonl   {"i", "id", "style_key", "content", "style"} per row (style_key = the "s<k>" id prefix)
   pooled.npy   (N, 1152) f16 backbone pooled features
   grid.npy     (N, 16, 1152) f16 backbone 4x4 patch grid
-  lat.npy      (N, 1024, 128) f16 packed normalised klein latents of the 512² image
+  lat.npy      optional image latents (not used to train the describer)
   img/<id>.jpg (eval caches only) the images
 """
 
