@@ -3,7 +3,7 @@ an experiment to create style cartridges for image generation/editing with Qwen-
 It takes in style reference/images as input, passes it to Megastyle encoder, which gives us the style embedding (reusable/controllable cartridge). this is passed to a small describer AR head which writes that style out as a short description (the cartridge), which Qwen-Image then follows for new generations or for restyling given images.
 
 ```
-style reference ─► MegaStyle encoder ─► describer head (trained) ─► style tokens(blended in qwen token space) ─► Qwen-Image 2.1 Turbo
+style reference ─► MegaStyle encoder ─► style embeddings(cartridge) ─► describer head (trained) ─► style tokens(blended in qwen token space) ─► Qwen-Image 2.1 Turbo
 ```
 
 Cartridges can be saved (~1 KB), mixed and interpolated, and style strength can be dialed up, which allows for better control (over methods like LoRA). By default, a *texture boost* (latent window) also shows Qwen-Image the style reference latents itself, in DiT blocks 12-19 only, which adds more texture/nuance without copying its subject.

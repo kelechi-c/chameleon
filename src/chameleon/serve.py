@@ -77,7 +77,8 @@ class Pipeline:
     # ------------------------------------------------------------------------------------------------ cartridges
     def table(self, head: tp.Any) -> torch.Tensor:
         """The token-embedding table a head was trained with: Qwen-Image's own text encoder (4096-d) or Qwen3-4B's."""
-        return self.evl.detach().clone() if head.cfg.d_out == self.evl.shape[1] else qimg.qwen3_embeddings()
+        dev = next(head.parameters()).device  # the encoder (and evl) may be swapped out to the cpu
+        return self.evl.detach().to(dev, copy=True) if head.cfg.d_out == self.evl.shape[1] else qimg.qwen3_embeddings(dev)
 
     def make(self, images: list[Image.Image], names: list[str] | None = None) -> cg.Cartridge:
         names = names or [f"ref{i}" for i in range(len(images))]
