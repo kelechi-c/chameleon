@@ -5,7 +5,7 @@ style you like. A small describer head writes that style out as a short descript
 then follows for new prompts or for restyling your photos. Qwen-Image itself is not fine-tuned.
 
 ```
-style images ─► MegaStyle encoder ─► describer head ─► style text ─► Qwen-Image 2.1 Turbo
+style reference ─► MegaStyle encoder ─► describer head (trained) ─► style text ─► Qwen-Image 2.1 Turbo
 ```
 
 Cartridges can be saved (~1 KB), mixed and interpolated. An optional *texture boost* also shows Qwen-Image the style
