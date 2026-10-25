@@ -8,7 +8,7 @@ then follows for new prompts or for restyling your photos. Qwen-Image itself is 
 style reference ─► MegaStyle encoder ─► describer head (trained) ─► style text ─► Qwen-Image 2.1 Turbo
 ```
 
-Cartridges can be saved (~1 KB), mixed and interpolated. An optional *texture boost* also shows Qwen-Image the style
+Cartridges can be saved (~1 KB), mixed and interpolated. By default, a *texture boost* (latent window) also shows Qwen-Image the style
 image itself, in DiT blocks 12-19 only, which adds surface texture without copying its subject.
 
 ## Try it
@@ -22,7 +22,7 @@ from chameleon import serve
 
 pipe = serve.Pipeline(hf_hub_download("tensorkelechi/chameleon-ar-head", "head_pre.pt"), None)
 cart = pipe.make([style_image], ["my-style"])                     # one cartridge from one or more images
-text, out = pipe.run(cart, ["a lighthouse on a rocky coast"], [photo], ref=style_image, texture=True)
+text, out = pipe.run(cart, ["a lighthouse on a rocky coast"], [photo], ref=style_image)
 mixed = pipe.mix([cart_a, cart_b], [0.5, 0.5])                    # mixing and interpolation
 ```
 

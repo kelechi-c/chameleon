@@ -94,7 +94,7 @@ class Pipeline:
     # ------------------------------------------------------------------------------------------------ generation
     @torch.no_grad()
     def run(self, cart: cg.Cartridge, prompts: list[str], photos: list[Image.Image], ref: Image.Image | None = None,
-            seed: int = 7, render: str = "text", texture: bool = False, strength: float = 1.0, plain: bool = True,
+            seed: int = 7, render: str = "text", texture: bool = True, strength: float = 1.0, plain: bool = True,
             ) -> tuple[str, list[tuple[str, Image.Image]]]:
         """The describer's text for the cartridge and labelled images: per prompt a t2i (+ a texture-boosted one when
         `texture` and a reference image are given), per photo an edit (+ texture). photos are cropped to 1024 px.
