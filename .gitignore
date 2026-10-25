@@ -6,6 +6,7 @@
 !/scripts/
 !/notebooks/
 !/space/
+!/assets/
 /scripts/*
 !/scripts/train_head.py
 /src/chameleon/klein.py
