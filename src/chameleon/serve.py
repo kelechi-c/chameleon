@@ -2,8 +2,8 @@
 mixed codes, rendered as describer text or soft tokens for qwen-image 2.1 turbo, t2i and photo edits, and the optional
 texture boost (the reference's vae latents visible to the target only in blocks 12-19).
 
-every model resident on one gpu (>= 40 gb, or zerogpu), else swapped per phase: the vl encoder and the dit (16 + 13 gb)
-take turns on the gpu, the small parts (style backbone, head, qwen3 embeddings) stay.
+every model resident on one gpu (>= 40 gb, or zerogpu), else swapped per phase so it fits a 24 gb L4: the small parts
+(style backbone, head, qwen3 embeddings; ~2 gb), the vl encoder (16 gb) and the dit (13 gb) take turns on the gpu.
 """
 
 import gc
@@ -58,7 +58,11 @@ class Pipeline:
             self.core.vae.enable_tiling()  # 1024 px decode next to the dit on 24 gb
             self.core.dit.to("cpu")
             self._free()
-        self.on = "both" if resident else "none"
+        if not resident:
+            self.head.to("cpu"), self.bb.to("cpu")
+            self.e4 = self.e4.to("cpu")
+            self._free()
+        self.on = "all" if resident else "none"
 
     @staticmethod
     def _free() -> None:
@@ -66,13 +70,23 @@ class Pipeline:
         torch.cuda.empty_cache()
 
     def _phase(self, which: str) -> None:
-        """Put the encoder ("enc") or the dit ("dit") on the gpu (no-op when resident)."""
+        """Put the small parts ("style"), the encoder ("enc") or the dit ("dit") on the gpu, the rest on the cpu (no-op
+        when resident)."""
         if self.resident or self.on == which:
             return
-        (self.core.dit if which == "enc" else self.enc).to("cpu")
+        for part in ("style", "enc", "dit"):
+            if part != which:
+                self._move(part, "cpu")
         self._free()
-        (self.enc if which == "enc" else self.core.dit).to(qm.DEV)
+        self._move(which, qm.DEV)
         self.on = which
+
+    def _move(self, part: str, dev: str) -> None:
+        if part == "style":
+            self.head.to(dev), self.bb.to(dev)
+            self.e4 = self.e4.to(dev)
+        else:
+            (self.enc if part == "enc" else self.core.dit).to(dev)
 
     # ------------------------------------------------------------------------------------------------ cartridges
     def table(self, head: tp.Any) -> torch.Tensor:
@@ -82,6 +96,7 @@ class Pipeline:
 
     def make(self, images: list[Image.Image], names: list[str] | None = None) -> cg.Cartridge:
         names = names or [f"ref{i}" for i in range(len(images))]
+        self._phase("style")
         return cg.make(self.head, self.bb, [im.convert("RGB") for im in images], names, self.head_name)
 
     def random(self, seed: int) -> cg.Cartridge:
@@ -104,8 +119,13 @@ class Pipeline:
         plain = plain or not boost
         photos = [square(p, 1024) for p in photos]
         grey = Image.new("RGB", (512, 512), (128, 128, 128))
+        self._phase("style")
+        evl = None  # soft tokens need qwen-image's own table next to the head (a temporary copy when swapping)
+        if render == "soft":
+            evl = self.evl if self.resident else self.evl.to(qm.DEV)
+        soft, said = cg.render(self.head, self.e4, evl, self.eos, cart, TAU, self.proc.tokenizer)
+        del evl
         self._phase("enc")
-        soft, said = cg.render(self.head, self.e4, self.evl, self.eos, cart, TAU, self.proc.tokenizer)
         enc = lambda prompt, ims=(): qm.encode(self.enc, self.proc, prompt, list(ims))  # noqa: E731
         jobs: list[tuple[str, str, int, tp.Any]] = []
         for i, p in enumerate(prompts):
@@ -143,7 +163,8 @@ class Pipeline:
             elif kind == "t2i + texture":
                 im = self.window(dev(t), [(lat_r, REF)], seed)
             elif kind == "edit" and strength != 1.0:
-                im = qm.edit_mix(core, [dev(neutral[i]), dev(t)], [1 - strength, strength], lat_ph[i], OUT, seed)
+                im = qm.edit_mix(core, [dev(neutral[i]), dev(t)], [1 - strength, strength], lat_ph[i], OUT, seed,
+                                 offload=not self.resident)
             elif kind == "edit":
                 im = qm.edit(core, dev(t), lat_ph[i], OUT, seed)
             else:

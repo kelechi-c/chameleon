@@ -164,25 +164,33 @@ def edit(core: Core, text: Text, refs: Tensor, ref_shape: tuple[int, int] | list
 @torch.no_grad()
 def edit_mix(core: Core, texts: list[Text], weights: list[float], refs: Tensor,
              ref_shape: tuple[int, int] | list[tuple[int, int]], seed: int,
-             out_shape: tuple[int, int] | None = None) -> Image.Image:
+             out_shape: tuple[int, int] | None = None, offload: bool = False) -> Image.Image:
     """Edit under several conditionings at once: each step's velocity is sum_i w_i v_i (one prefill and kv cache per
     conditioning, the same noise). strength of a style = [neutral, style] with [1 - a, a] (a > 1 extrapolates);
-    a style mix = [style_1, style_2] with weights summing to 1. costs len(texts) forward passes per step."""
+    a style mix = [style_1, style_2] with weights summing to 1. costs len(texts) forward passes per step. offload:
+    only one kv cache (~2 gb at 1024) on the gpu at a time, the others wait on the cpu (fits a 24 gb L4)."""
     shapes = list(ref_shape) if isinstance(ref_shape, list) else [ref_shape]
     shape = out_shape or shapes[0]
     sig = torch.tensor([*TURBO, 0.0], device=DEV)
     levels = (sig * 1000).to(torch.bfloat16) / 1000
     lat = noise(shape, seed)
     lays = [layout(slots, shapes + [shape], core.dit.cfg) for _, slots in texts]
+    park = lambda c, dev: [(k.to(dev), v.to(dev)) for k, v in c] if offload else c  # noqa: E731
     caches, vs = [], []
     for (states, _), lay in zip(texts, lays):
         v, cache = core.dit.prefill(torch.cat([refs, lat], dim=1), states, levels[:1], lay)
         vs.append(v)
-        caches.append(cache)
+        caches.append(park(cache, "cpu"))
+        del cache
     mix = lambda vv: sum(w * x.float() for w, x in zip(weights, vv)).to(vv[0].dtype)  # noqa: E731
     lat = euler(lat, mix(vs), sig[0], sig[1])
     for i in range(1, len(TURBO)):
-        vs = [core.dit.decode(lat, levels[i:i + 1], lay, cache, i) for lay, cache in zip(lays, caches)]
+        vs = []
+        for j, lay in enumerate(lays):
+            cache = park(caches[j], DEV)
+            vs.append(core.dit.decode(lat, levels[i:i + 1], lay, cache, i))
+            caches[j] = park(cache, "cpu")  # decode wrote this step's rows into it
+            del cache
         lat = euler(lat, mix(vs), sig[i], sig[i + 1])
     del caches, vs
     return to_image(core, lat, shape)

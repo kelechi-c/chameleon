@@ -14,7 +14,7 @@ Training the AR head took about 28 minutes on one A100, after style feature extr
 
 ## usage
 
-- [colab notebook](https://colab.research.google.com/drive/1qReAl3VY5_NmbOy-5agauQjncgKJ4mPN?usp=sharing) just like the good ol' clip diffusion days, (needs GPU with over 22 GB vram, such as an L4/A100).
+- [colab notebook](https://colab.research.google.com/drive/1qReAl3VY5_NmbOy-5agauQjncgKJ4mPN?usp=sharing) just like the good ol' clip diffusion days, (runs on a 24 GB GPU such as an L4, or an A100).
 - local usage:
 
 ```python
