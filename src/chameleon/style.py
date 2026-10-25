@@ -67,31 +67,28 @@ def features(bb: tp.Any, pix: Tensor) -> tuple[Tensor, Tensor]:
 
 @dc.dataclass(frozen=True)
 class HeadCfg:
-    """Style head shape."""
+    """Describer head shape (stored as a dict in head_pre.pt)."""
 
-    d_in: int = 1152
-    d_z: int = 256
-    n_tok: int = 16
-    width: int = 1024
-    depth: int = 4
-    heads: int = 16
-    d_out: int = 7680
-    grid: bool = False
-    space: str = "state"    # "state": tokens appended to the encoder output; "embed": soft tokens at the encoder input;
-                            # "vocab": per-position queries scored against the vocabulary, soft tokens = softmax @ E
-                            # "ar": autoregressive describer (StyleDescriber), soft tokens along its greedy path
-    tau: float = 1.0        # vocab / ar: softmax temperature of the soft tokens (0 = argmax text)
-    n_mem: int = 4          # ar: memory tokens the code z is expanded into
-    dropout: float = 0.0    # ar: decoder dropout (the describer memorises its 10k training style texts)
-    out_scale: float = 1.0  # gain on the output layer: adam moves every output channel ~lr * fan-in per step, so the
-                            # token step size is set by this gain (1.0 gave ~0.08 std per channel per step: r0-r2)
+    d_in: int = 1152        # MegaStyle pooled feature
+    d_z: int = 256          # the cartridge code z
+    n_tok: int = 16         # max tokens written (r7: 144)
+    width: int = 1024       # decoder width
+    depth: int = 4          # decoder layers
+    heads: int = 16         # attention heads
+    d_out: int = 7680       # token-embedding width of the table the head reads and writes (Qwen3-4B: 2560)
+    space: str = "state"    # head type; only "ar" (the describer) is supported here
+    tau: float = 1.0        # soft-token temperature (0 = the written text itself)
+    n_mem: int = 4          # memory tokens the code z is expanded into
+    dropout: float = 0.0    # decoder dropout
+    grid: bool = False      # unused by the describer; kept so older checkpoints load
+    out_scale: float = 1.0  # unused by the describer; kept so older checkpoints load
 
 
 class StyleDescriber(nn.Module):
-    """Autoregressive "describer": posterior over z (as StyleHead) -> n_mem memory tokens -> causal transformer that
-    writes the style text, reading and writing tokens through the frozen Qwen3-4B input-embedding matrix E (passed in,
-    not stored). fixes the position misalignment of the non-autoregressive vocab head. soft tokens are
-    softmax(logits / tau) @ E along the greedy path (tau 0 = the generated text itself); z stays the cartridge."""
+    """Autoregressive "describer": posterior over z -> n_mem memory tokens -> causal transformer that writes the style
+    text, reading and writing tokens through the frozen Qwen3-4B input-embedding matrix E (passed in, not stored).
+    soft tokens are softmax(logits / tau) @ E along the greedy path (tau 0 = the generated text itself); z stays the
+    cartridge."""
 
     def __init__(self, cfg: HeadCfg, text_mean: Tensor, text_std: Tensor) -> None:
         super().__init__()
