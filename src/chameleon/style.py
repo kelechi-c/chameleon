@@ -80,7 +80,7 @@ class HeadCfg:
     tau: float = 1.0        # soft-token temperature (0 = the written text itself)
     n_mem: int = 4          # memory tokens the code z is expanded into
     dropout: float = 0.0    # decoder dropout
-    grid: bool = False      # unused by the describer; kept so older checkpoints load
+    grid: bool = False      # also read the 4x4 feature grid of the references (16 extra memory tokens)
     out_scale: float = 1.0  # unused by the describer; kept so older checkpoints load
 
 
@@ -97,8 +97,12 @@ class StyleDescriber(nn.Module):
         self.enc = nn.Sequential(nn.LayerNorm(cfg.d_in), nn.Linear(cfg.d_in, d), nn.GELU(), nn.Linear(d, 2 * cfg.d_z))
         self.z_in = nn.Linear(cfg.d_z, cfg.n_mem * d)
         self.tok_in = nn.Linear(cfg.d_out, d)
+        self.n_grid = 16 if cfg.grid else 0
+        if cfg.grid:  # the grid, or a learned stand-in when a code has none (random, mixed without grids)
+            self.grid_in = nn.Sequential(nn.LayerNorm(cfg.d_in), nn.Linear(cfg.d_in, d))
+            self.grid_null = nn.Parameter(torch.randn(16, d) * 0.02)
         self.bos = nn.Parameter(torch.randn(d) * 0.02)
-        self.pos = nn.Parameter(torch.randn(cfg.n_mem + cfg.n_tok + 1, d) * 0.02)
+        self.pos = nn.Parameter(torch.randn(cfg.n_mem + self.n_grid + cfg.n_tok + 1, d) * 0.02)
         layer = nn.TransformerEncoderLayer(d, cfg.heads, 4 * d, dropout=cfg.dropout, activation="gelu",
                                            batch_first=True, norm_first=True)
         self.body = nn.TransformerEncoder(layer, cfg.depth, enable_nested_tensor=False)
@@ -112,18 +116,33 @@ class StyleDescriber(nn.Module):
         mu, logvar = self.enc(pooled).chunk(2, dim=-1)
         return mu, logvar.clamp(-8.0, 4.0)
 
-    def logits(self, z: Tensor, ids_in: Tensor, emb: Tensor) -> Tensor:
+    def memory(self, z: Tensor, grid: Tensor | None = None, keep: Tensor | None = None) -> Tensor:
+        """(B, n_mem [+ 16], width): z's memory tokens, after the grid's when the head reads one. grid (B, 16, d_in);
+        keep (B,) bool: False -> the stand-in for that sample (grid dropout)."""
+        b = z.shape[0]
+        mem = self.z_in(z).view(b, self.cfg.n_mem, -1)
+        if not self.n_grid:
+            return mem
+        null = self.grid_null.expand(b, -1, -1)
+        g = null if grid is None else self.grid_in(grid.to(z.dtype))
+        if grid is not None and keep is not None:
+            g = torch.where(keep[:, None, None], g, null)
+        return torch.cat([g, mem], dim=1)
+
+    def logits(self, z: Tensor, ids_in: Tensor, emb: Tensor, grid: Tensor | None = None, keep: Tensor | None = None
+               ) -> Tensor:
         """Teacher-forced next-token logits (B, L + 1, vocab) for input ids (B, L): position j predicts token j."""
-        b, n = z.shape[0], self.cfg.n_mem
-        x = torch.cat([self.z_in(z).view(b, n, -1), self.bos.expand(b, 1, -1),
-                       self.tok_in(emb[ids_in].float())], dim=1)
+        b = z.shape[0]
+        mem = self.memory(z, grid, keep)
+        n = mem.shape[1]
+        x = torch.cat([mem, self.bos.expand(b, 1, -1), self.tok_in(emb[ids_in].float())], dim=1)
         x = x + self.pos[: x.shape[1]]
         causal = torch.triu(torch.full((x.shape[1], x.shape[1]), float("-inf"), device=x.device), 1)
         h = self.body(x, mask=causal)[:, n:]
         return (self.out(self.norm(h)).to(emb.dtype) @ emb.T).float()
 
-    def describe(self, z: Tensor, emb: Tensor, eos: int, tau: float, out_emb: Tensor | None = None
-                 ) -> tuple[list[Tensor], list[list[int]]]:
+    def describe(self, z: Tensor, emb: Tensor, eos: int, tau: float, out_emb: Tensor | None = None,
+                 grid: Tensor | None = None) -> tuple[list[Tensor], list[list[int]]]:
         """Greedy decoding up to eos or n_tok tokens. returns per-sample soft tokens (n_i, d) and token ids. out_emb:
         another text encoder's input-embedding matrix over the same vocabulary (e.g. qwen-image's qwen3-vl): the soft
         tokens are then softmax(logits / tau) @ out_emb, while decoding itself still reads emb."""
@@ -131,7 +150,7 @@ class StyleDescriber(nn.Module):
         ids = torch.zeros(b, 0, dtype=torch.long, device=z.device)
         steps = []
         for _ in range(self.cfg.n_tok):
-            lg = self.logits(z, ids, emb)[:, -1]
+            lg = self.logits(z, ids, emb, grid)[:, -1]
             steps.append(lg)
             ids = torch.cat([ids, lg.argmax(-1, keepdim=True)], dim=1)
         lg = torch.stack(steps, 1)

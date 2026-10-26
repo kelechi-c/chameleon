@@ -137,7 +137,8 @@ def train(a: argparse.Namespace) -> None:
     mult = a.mult or [1.0] * len(caches)
     w = np.array([len(c.groups) * m for c, m in zip(caches, mult)])  # sample sources by style count x mult
     d = emb.shape[1]
-    cfg = style.HeadCfg(d_z=a.d_z, n_tok=a.n_tok, depth=a.depth, space="ar", d_out=d, tau=a.tau, dropout=a.dropout)
+    cfg = style.HeadCfg(d_z=a.d_z, n_tok=a.n_tok, depth=a.depth, space="ar", d_out=d, tau=a.tau, dropout=a.dropout,
+                        grid=a.grid)
     head = style.StyleDescriber(cfg, torch.zeros(d), torch.ones(d)).to(dev)
     print(f"head {sum(p.numel() for p in head.parameters()) / 1e6:.1f}M params; styles {w.astype(int).tolist()}; "
           f"eval styles {len(ev.groups)}", flush=True)
@@ -151,13 +152,19 @@ def train(a: argparse.Namespace) -> None:
         tgt = torch.tensor([x + [eos] + [-100] * (a.n_tok - len(x)) for x in r], device=dev)
         return inp, tgt
 
-    def loss(c: data.Cache, bt: data.Batch, noise: bool) -> torch.Tensor:
+    def loss(c: data.Cache, bt: data.Batch, noise: bool, use_grid: bool = True) -> torch.Tensor:
         mu, lv = head.posterior(bt.pooled.to(dev))
         z, _ = style.pool_posterior(mu, lv, bt.mask.to(dev))  # one code from all references
         if noise:  # fixed jitter instead of a learned variance
             z = z + a.z_noise * torch.randn(z.shape, generator=gen).to(dev)
+        grid = keep = None
+        if a.grid and use_grid:  # mean feature grid of the references; dropped for some samples while training
+            m = bt.mask.to(dev).float()
+            grid = (m[..., None, None] * bt.grid.to(dev)).sum(1) / m.sum(1).clamp_min(1)[:, None, None]
+            if noise:
+                keep = torch.rand(z.shape[0], generator=gen).to(dev) >= a.p_grid_drop
         inp, tgt = ids([c.rows[t]["style"] for t in bt.target])
-        return F.cross_entropy(head.logits(z, inp, emb).flatten(0, 1), tgt.flatten(), ignore_index=-100)
+        return F.cross_entropy(head.logits(z, inp, emb, grid, keep).flatten(0, 1), tgt.flatten(), ignore_index=-100)
 
     t0, run, best = time.time(), [], (float("inf"), 0, None)
     for step in range(a.steps):
@@ -179,6 +186,13 @@ def train(a: argparse.Namespace) -> None:
             print(f"step {step + 1} train_ce {np.mean(run):.4f} eval_ce {ev_l:.4f} best {best[0]:.4f}@{best[1]} {time.time() - t0:.0f}s", flush=True)
             run = []
     head.load_state_dict(best[2])
+    if a.grid:  # the same head without its grid (what random and grid-less codes get)
+        head.eval()
+        with torch.no_grad():
+            erng = np.random.default_rng(99)
+            ng = float(np.mean([loss(ev, data.sample_batch(ev, a.bs, erng, r_max=3, p_cap=0.0, p_style=0.0), False,
+                                     False).item() for _ in range(16)]))
+        print(f"best weights without the grid: eval_ce {ng:.4f}", flush=True)
     torch.save({"head": head.state_dict(), "cfg": dc.asdict(cfg), "step": best[1]}, a.out / "head_pre.pt")
     print(f"saved {a.out / 'head_pre.pt'} (best eval ce {best[0]:.4f} at step {best[1]})", flush=True)
 
@@ -207,6 +221,8 @@ def main() -> None:
     t.add_argument("--z-noise", type=float, default=0.05)
     t.add_argument("--eval-every", type=int, default=200)
     t.add_argument("--seed", type=int, default=0)
+    t.add_argument("--grid", action="store_true", help="also read the references' 4x4 feature grid")
+    t.add_argument("--p-grid-drop", type=float, default=0.2, help="grid dropout (the head must also work without one)")
     t.add_argument("--emb", choices=tuple(TABLES), default="qwen3", help="token-embedding table the head writes through")
     a = ap.parse_args()
     if a.cmd == "features":
