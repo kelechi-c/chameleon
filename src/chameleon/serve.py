@@ -24,7 +24,7 @@ T2I: str = "{p}, in the visual style of <image1> (its colours, medium, texture a
 EDIT: str = ("Redraw <image1> in the visual style of <image2>: its colours, medium, texture and lighting. Keep the "
              "content and composition of <image1>; take nothing else from <image2>.")
 WINDOW: tuple[int, int] = (12, 19)
-DEPTH: int | None = 14  # restyle depth: photo edits see the photo only in dit blocks 0..DEPTH (13 = strong, None = all)
+DEPTH: int | None = None  # restyle depth: photo edits see the photo only in dit blocks 0..DEPTH (None = all; 13 for nature photos)
 REF, OUT = (32, 32), (64, 64)  # latent tokens: reference at 512 px, output / photo at 1024 px
 
 
@@ -116,9 +116,9 @@ class Pipeline:
         """The describer's text for the cartridge and labelled images: per prompt a t2i (+ a texture-boosted one when
         `texture` and a reference image are given), per photo an edit (+ texture). photos are cropped to 1024 px.
         plain=False with texture: the texture-boosted images only. depth (restyle depth): photo edits see the photo
-        only in dit blocks 0..depth. 14 (default) restyles harder than seeing it everywhere while keeping faces and
-        layout; 13 is the strong setting (photographic surfaces such as feathers, scales or fur are redrawn, but faces,
-        lettering and fine detail drift); None = every block (most faithful to the photo)."""
+        only in dit blocks 0..depth. None (default) = every block, most faithful to the photo. 13 suits nature photos
+        (photographic surfaces such as feathers, scales or fur are redrawn) but faces, expressions and lettering drift;
+        14 is in between."""
         boost = texture and ref is not None
         plain = plain or not boost
         photos = [square(p, 1024) for p in photos]

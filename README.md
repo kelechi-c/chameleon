@@ -8,7 +8,7 @@ style reference ─► MegaStyle encoder ─► style embeddings(cartridge) ─�
 
 Cartridges can be saved (~1 KB), mixed and interpolated, and style strength can be dialed up, which allows for better control (over methods like LoRA). By default, a *texture boost* (latent window) also shows Qwen-Image the style reference latents itself, in DiT blocks 12-19 only, which adds more texture/nuance without copying its subject.
 
-When restyling photos, a *restyle depth* (default 14) lets Qwen-Image see the photo only in DiT blocks 0-14, so its photographic surface gets redrawn in the new style while the layout stays. `depth=13` is the stronger setting (good for nature photos: fur, feathers, scales), at some cost to faces and lettering; `depth=None` stays closest to the photo.
+Nature photos (fur, feathers, scales) tend to keep their photographic look. For those, an optional *restyle depth* (`depth=13`) lets Qwen-Image see the photo only in DiT blocks 0-13, so its surface gets redrawn in the new style while the pose and layout stay. It is off by default, because it also changes faces, expressions and lettering.
 
 Training the AR head took about 28 minutes on one A100, after style feature extraction. the Megastyle encoder is basically siglip tuned on Megastyle dataset, repo -> [Gaojunyao/MegaStyle](https://huggingface.co/Gaojunyao/MegaStyle). 
 
