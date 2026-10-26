@@ -20,7 +20,7 @@ models:
 
 # chameleon
 
-Chameleon turns the style of a few images into a ~1 KB cartridge and applies it with Qwen-Image 2.1 Turbo, without
+Chameleon turns the style of a few images into a small (~38 KB) cartridge and applies it with Qwen-Image 2.1 Turbo, without
 fine-tuning Qwen-Image. Reference images go through the MegaStyle encoder to a style code, which a describer head
 writes out as text or soft tokens for Qwen-Image's text encoder. Texture boost adds the reference's VAE latents, visible
 only in DiT blocks 12–19.

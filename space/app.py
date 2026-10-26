@@ -1,5 +1,5 @@
 """chameleon: style cartridges for Qwen-Image 2.1 Turbo (hugging face space). chameleon.serve does the work; this file is
-the ui. the describer head is downloaded from the hub (HEAD_REPO); a code_prior.pt in that repo enables random styles.
+the ui. the describer head is downloaded from the hub (HEAD_REPO); a code_prior_grid.pt in that repo enables random styles.
 CHAMELEON_DEFER=1 skips loading, for a caller that sets app.PIPE itself."""
 
 import os
@@ -32,10 +32,10 @@ elif ZERO or torch.cuda.is_available():
     try:
         from huggingface_hub import hf_hub_download
         try:
-            prior = hf_hub_download(HEAD_REPO, "code_prior.pt")
+            prior = hf_hub_download(HEAD_REPO, "code_prior_grid.pt")
         except Exception:  # noqa: BLE001 - a head without a random-style prior
             prior = None
-        PIPE = serve.Pipeline(hf_hub_download(HEAD_REPO, "head_pre.pt"), prior, resident=True if ZERO else None,
+        PIPE = serve.Pipeline(hf_hub_download(HEAD_REPO, "head_grid.pt"), prior, resident=True if ZERO else None,
                               head_name=HEAD_REPO.split("/")[-1])
     except Exception:  # noqa: BLE001 - shown in the ui instead of a crashed space
         WHY = traceback.format_exc(limit=3)
@@ -46,7 +46,7 @@ else:
 INTRO = """
 # 🦎 chameleon: style cartridges for Qwen-Image
 
-Upload a few images you like. Chameleon turns their **style** into a small *cartridge* (a ~1 KB code) and applies it to
+Upload a few images you like. Chameleon turns their **style** into a small *cartridge* (a ~38 KB code) and applies it to
 your prompts or photos with Qwen-Image 2.1 Turbo. It's roughly a home-made `--sref`. Nothing in Qwen-Image is
 fine-tuned: a style encoder → a describer head → the text Qwen-Image reads.
 
