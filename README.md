@@ -42,6 +42,8 @@ random = pipe.random(48213)                                       # a random sty
 ## sample outputs
 Some restyled samples can be visualized here: [Chameleon showcase](https://claude.ai/artifact/CqQjJsQ1nsJfTNaPFKXY1y).
 
+![crayon drawing](assets/crayon.webp)
+
 ![Sistine Chapel fresco](assets/sistine.webp)
 
 ![ink sketch](assets/inksketch.webp)
