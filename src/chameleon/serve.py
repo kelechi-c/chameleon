@@ -24,6 +24,7 @@ T2I: str = "{p}, in the visual style of <image1> (its colours, medium, texture a
 EDIT: str = ("Redraw <image1> in the visual style of <image2>: its colours, medium, texture and lighting. Keep the "
              "content and composition of <image1>; take nothing else from <image2>.")
 WINDOW: tuple[int, int] = (12, 19)
+DEPTH: int | None = 14  # restyle depth: photo edits see the photo only in dit blocks 0..DEPTH (13 = strong, None = all)
 REF, OUT = (32, 32), (64, 64)  # latent tokens: reference at 512 px, output / photo at 1024 px
 
 
@@ -111,10 +112,13 @@ class Pipeline:
     @torch.no_grad()
     def run(self, cart: cg.Cartridge, prompts: list[str], photos: list[Image.Image], ref: Image.Image | None = None,
             seed: int = 7, render: str = "text", texture: bool = True, strength: float = 1.0, plain: bool = True,
-            ) -> tuple[str, list[tuple[str, Image.Image]]]:
+            depth: int | None = DEPTH) -> tuple[str, list[tuple[str, Image.Image]]]:
         """The describer's text for the cartridge and labelled images: per prompt a t2i (+ a texture-boosted one when
         `texture` and a reference image are given), per photo an edit (+ texture). photos are cropped to 1024 px.
-        plain=False with texture: the texture-boosted images only."""
+        plain=False with texture: the texture-boosted images only. depth (restyle depth): photo edits see the photo
+        only in dit blocks 0..depth. 14 (default) restyles harder than seeing it everywhere while keeping faces and
+        layout; 13 is the strong setting (photographic surfaces such as feathers, scales or fur are redrawn, but faces,
+        lettering and fine detail drift); None = every block (most faithful to the photo)."""
         boost = texture and ref is not None
         plain = plain or not boost
         photos = [square(p, 1024) for p in photos]
@@ -156,6 +160,7 @@ class Pipeline:
         core = self.core
         lat_r = qm.to_latents(core, [square(ref, 512)]) if boost else None
         lat_ph = [qm.to_latents(core, [ph]) for ph in photos]
+        photo = None if depth is None else (0, depth)
         out = []
         for label, kind, i, t in jobs:
             if kind == "t2i":
@@ -164,24 +169,25 @@ class Pipeline:
                 im = self.window(dev(t), [(lat_r, REF)], seed)
             elif kind == "edit" and strength != 1.0:
                 im = qm.edit_mix(core, [dev(neutral[i]), dev(t)], [1 - strength, strength], lat_ph[i], OUT, seed,
-                                 offload=not self.resident)
+                                 offload=not self.resident, hooks=Hooks(photo_window=photo))
             elif kind == "edit":
-                im = qm.edit(core, dev(t), lat_ph[i], OUT, seed)
+                im = qm.edit(core, dev(t), lat_ph[i], OUT, seed, Hooks(photo_window=photo))
             else:
-                im = self.window(dev(t), [(lat_ph[i], OUT), (lat_r, REF)], seed)
+                im = self.window(dev(t), [(lat_ph[i], OUT), (lat_r, REF)], seed, photo)
             out.append((f"{label} · {kind}", im))
         return said.strip(), out
 
     @torch.no_grad()
-    def window(self, text: qm.Text, refs: list[tuple[torch.Tensor, tuple[int, int]]], seed: int) -> Image.Image:
+    def window(self, text: qm.Text, refs: list[tuple[torch.Tensor, tuple[int, int]]], seed: int,
+               photo: tuple[int, int] | None = None) -> Image.Image:
         """Turbo generation with the last reference visible to the target only in WINDOW: t2i refs = [style ref];
-        edit refs = [photo, style ref]."""
+        edit refs = [photo, style ref] (photo: the photo's own block window)."""
         states, slots = text
         dit = self.core.dit
         sig = torch.tensor([*qm.TURBO, 0.0], device=qm.DEV)
         levels = (sig * 1000).to(torch.bfloat16) / 1000
         lat = qm.noise(OUT, seed)
-        hooks = Hooks(ref_window=WINDOW, window_last=True)
+        hooks = Hooks(ref_window=WINDOW, window_last=True, photo_window=photo)
         lay = qm.layout(slots, [s for _, s in refs] + [OUT], dit.cfg)
         v, cache = dit.prefill(torch.cat([r for r, _ in refs] + [lat], dim=1), states, levels[:1], lay, hooks)
         lat = qm.euler(lat, v, sig[0], sig[1])

@@ -164,7 +164,7 @@ def edit(core: Core, text: Text, refs: Tensor, ref_shape: tuple[int, int] | list
 @torch.no_grad()
 def edit_mix(core: Core, texts: list[Text], weights: list[float], refs: Tensor,
              ref_shape: tuple[int, int] | list[tuple[int, int]], seed: int,
-             out_shape: tuple[int, int] | None = None, offload: bool = False) -> Image.Image:
+             out_shape: tuple[int, int] | None = None, offload: bool = False, hooks: Hooks = Hooks()) -> Image.Image:
     """Edit under several conditionings at once: each step's velocity is sum_i w_i v_i (one prefill and kv cache per
     conditioning, the same noise). strength of a style = [neutral, style] with [1 - a, a] (a > 1 extrapolates);
     a style mix = [style_1, style_2] with weights summing to 1. costs len(texts) forward passes per step. offload:
@@ -178,7 +178,7 @@ def edit_mix(core: Core, texts: list[Text], weights: list[float], refs: Tensor,
     park = lambda c, dev: [(k.to(dev), v.to(dev)) for k, v in c] if offload else c  # noqa: E731
     caches, vs = [], []
     for (states, _), lay in zip(texts, lays):
-        v, cache = core.dit.prefill(torch.cat([refs, lat], dim=1), states, levels[:1], lay)
+        v, cache = core.dit.prefill(torch.cat([refs, lat], dim=1), states, levels[:1], lay, hooks)
         vs.append(v)
         caches.append(park(cache, "cpu"))
         del cache
@@ -188,7 +188,7 @@ def edit_mix(core: Core, texts: list[Text], weights: list[float], refs: Tensor,
         vs = []
         for j, lay in enumerate(lays):
             cache = park(caches[j], DEV)
-            vs.append(core.dit.decode(lat, levels[i:i + 1], lay, cache, i))
+            vs.append(core.dit.decode(lat, levels[i:i + 1], lay, cache, i, hooks))
             caches[j] = park(cache, "cpu")  # decode wrote this step's rows into it
             del cache
         lat = euler(lat, mix(vs), sig[i], sig[i + 1])
