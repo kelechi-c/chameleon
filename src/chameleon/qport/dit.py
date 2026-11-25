@@ -50,6 +50,8 @@ class Layout:
     segments: tuple[Segment, ...]  # runs of the prefix: text runs and reference images
     rope: Tensor  # (S, head_dim / 2) complex rotations
 
+    style_tokens: int = 0
+
     @property
     def ref_idx(self) -> Tensor:
         """Positions of the reference-image tokens (image tokens inside the prefix)."""
@@ -65,6 +67,14 @@ class Hooks:
     ref_window: tuple[int, int] | None = None  # target rows see the reference keys only in blocks lo..hi (inclusive)
     window_last: bool = False  # the window applies to the last reference image only (edit: the style ref, not the photo)
     photo_window: tuple[int, int] | None = None  # the first reference image (edit: the photo) only in blocks lo..hi
+
+    style_block: Tensor | None = None
+    style_rope: tp.Literal["sequential", "pinned"] = "sequential"
+    prompt_keys: Tensor | None = None  # original encoder positions (before slot expansion and style append)
+    loosen: float = 0.0
+    style_boost: float = 0.0
+    photo_bias: float = 0.0  # positive magnitude of the negative bias
+    extra_kv: dict[int, KV] | None = None  # pre-rotated keys and values for target queries only
 
 
 def rope_table(index: Tensor, dim: int, theta: float = 10000.0) -> Tensor:
@@ -111,15 +121,20 @@ def _runs(image: Tensor, lengths: list[int], prefix: int) -> tuple[Segment, ...]
     return tuple((a, b, bool(ids[a] < 0)) for a, b in zip(edges, edges[1:]) if b > a)
 
 
-def layout(slots: Tensor, shapes: list[tuple[int, int]], cfg: DitConfig) -> Layout:
+def layout(slots: Tensor, shapes: list[tuple[int, int]], cfg: DitConfig, hooks: Hooks = Hooks()) -> Layout:
     """Layout of an edit or t2i request. `slots` is the encoder's image-slot mask (T,); `shapes` (h, w) in latent
     tokens, reference images first, target last."""
     target = shapes[-1][0] * shapes[-1][1]
-    slots = torch.cat([slots.bool(), slots.new_ones(target // SLOT, dtype=torch.bool)])
+    style_tokens = 0 if hooks.style_block is None else hooks.style_block.shape[1]
+    slots = torch.cat([slots.bool(), slots.new_zeros(style_tokens, dtype=torch.bool),
+                       slots.new_ones(target // SLOT, dtype=torch.bool)])
     repeats = torch.where(slots, SLOT, 1)
     image = torch.repeat_interleave(slots, repeats)
     prefix = image.numel() - target
-    return Layout(repeats, image, prefix, _runs(image, [h * w for h, w in shapes], prefix), _rope(image, shapes, cfg))
+    rope = _rope(image, shapes, cfg)
+    if style_tokens and hooks.style_rope == "pinned":
+        rope[prefix - style_tokens:prefix] = 1
+    return Layout(repeats, image, prefix, _runs(image, [h * w for h, w in shapes], prefix), rope, style_tokens)
 
 
 def source_layout(n_text: int, shape: tuple[int, int], cfg: DitConfig, device: torch.device) -> Layout:
@@ -148,6 +163,51 @@ def ref_mask(hooks: Hooks, block: int, lay: Layout, device: torch.device) -> Ten
         a, b, _ = [s for s in lay.segments if not s[2]][0]
         m[a:b] = False
     return m
+
+
+def target_mask(hooks: Hooks, block: int, step: int, lay: Layout, like: Tensor) -> Tensor | None:
+    """Add target-query key biases while preserving hard reference windows."""
+    keep = ref_mask(hooks, block, lay, like.device)
+    taper = (1.0, 0.5, 0.25)
+    loosen = hooks.loosen * taper[step] if step < len(taper) else 0.0
+    style_boost = hooks.style_boost if lay.style_tokens else 0.0
+    photo = next((s for s in lay.segments if not s[2]), None) if hooks.photo_bias and block >= 14 else None
+    if not (loosen or style_boost or photo):
+        return keep
+    bias = like.new_zeros(lay.image.numel())
+    style_start = lay.prefix - lay.style_tokens
+    if loosen:
+        if hooks.prompt_keys is None:
+            raise ValueError("loosen requires a content-prompt key mask")
+        keys = hooks.prompt_keys.to(device=like.device, dtype=torch.bool)
+        n_encoder = lay.repeats.numel() - lay.style_tokens - (lay.image.numel() - lay.prefix) // SLOT
+        if keys.shape != (n_encoder,):
+            raise ValueError("prompt_keys must cover the original encoder positions")
+        prompt = keys.repeat_interleave(lay.repeats[:n_encoder], output_size=style_start)
+        prompt &= ~lay.image[:style_start]
+        bias[:style_start].masked_fill_(prompt, -loosen)
+    if style_boost:
+        bias[style_start:lay.prefix] = style_boost
+    if photo:
+        bias[photo[0]:photo[1]] = -hooks.photo_bias
+    return bias if keep is None else bias.masked_fill(~keep, -torch.inf)
+
+
+def target_attention(q: Tensor, k: Tensor, v: Tensor, mask: Tensor | None, extra: KV | None) -> Tensor:
+    """Target-only attention, optionally including compact reference keys."""
+    if extra is not None:
+        extra_k, extra_v = (x.to(k).expand(k.shape[0], -1, -1, -1) for x in extra)
+        k, v = torch.cat([k, extra_k], dim=1), torch.cat([v, extra_v], dim=1)
+        if mask is not None:
+            mask = F.pad(mask, (0, extra_k.shape[1]), value=mask.dtype == torch.bool)
+    if mask is None:
+        return sdpa(q, k, v)
+    if mask.dtype == torch.bool:
+        return sdpa(q, k, v, mask[None, None, None])
+    size = mask.shape[0]
+    # CUDA memory-efficient SDPA requires the bias row stride to be a multiple of eight.
+    aligned = F.pad(mask, (0, -size % 8))[None, None, None, :][..., :size]
+    return sdpa(q, k, v, aligned)
 
 
 def rms(x: Tensor, weight: Tensor, eps: float) -> Tensor:
@@ -237,25 +297,27 @@ class Block(nn.Module):
         """The mlp branch with its residual."""
         return x + mod[3] * self.img_mlp(self._norm(x, mod[2]))
 
-    def prefill(self, x: Tensor, mod: Mod, lay: Layout, kmask: Tensor | None = None) -> tuple[Tensor, KV]:
+    def prefill(self, x: Tensor, mod: Mod, lay: Layout, kmask: Tensor | None = None,
+                extra: KV | None = None) -> tuple[Tensor, KV]:
         """Whole joint sequence; returns the stream and this layer's keys and values (prefix rows = the cache).
-        kmask (S,) bool: keys the target rows may attend to (None = all)."""
+        kmask (S,): a boolean key mask or additive attention bias (None = all)."""
         q, k, v = self.attn.qkv(self._norm(x, mod[0]), lay.rope)
         att = attend_prefix(q, k, v, lay)
         if lay.prefix < x.shape[1]:
-            att = torch.cat([att, sdpa(q[:, lay.prefix:], k, v, None if kmask is None else kmask[None, None, None])],
+            att = torch.cat([att, target_attention(q[:, lay.prefix:], k, v, kmask, extra)],
                             dim=1)
         x = x + mod[1] * self.attn.to_out[0](att.flatten(2))
         return self._mlp(x, mod), (k, v)
 
-    def decode(self, x: Tensor, mod: Mod, rope: Tensor, cache: KV, kmask: Tensor | None = None) -> Tensor:
+    def decode(self, x: Tensor, mod: Mod, rope: Tensor, cache: KV, kmask: Tensor | None = None,
+               extra: KV | None = None) -> Tensor:
         """Target rows only: write their keys and values into the cache tail, attend to [prefix, target] (all, or the
         keys in kmask)."""
         k, v = cache
         rows = x.shape[1]
         q, k_new, v_new = self.attn.qkv(self._norm(x, mod[0]), rope)
         k[:, -rows:], v[:, -rows:] = k_new, v_new
-        x = x + mod[1] * self.attn.to_out[0](sdpa(q, k, v, None if kmask is None else kmask[None, None, None]).flatten(2))
+        x = x + mod[1] * self.attn.to_out[0](target_attention(q, k, v, kmask, extra).flatten(2))
         return self._mlp(x, mod)
 
 
@@ -319,6 +381,9 @@ class Dit(nn.Module):
         latents then the noisy target; text (B, T, 4096)."""
         batch, target = latents.shape[0], lay.image.numel() - lay.prefix
         t = self.text_embed(text)
+        if hooks.style_block is not None:
+            style = hooks.style_block.to(t).expand(batch, -1, -1)
+            t = torch.cat([t, style], dim=1)
         x = torch.cat([t, t.new_zeros(batch, target // SLOT, t.shape[-1])], dim=1).repeat_interleave(lay.repeats, dim=1)
         x[:, lay.image] = self.img_in(latents)
         temb = self.time_embed(torch.cat([sigma, sigma.new_zeros(1)]))
@@ -330,7 +395,8 @@ class Dit(nn.Module):
                 x[:, ref] = hooks.ref(i, x[:, ref])
             if hooks.target is not None:
                 x[:, lay.prefix:] = hooks.target(i, 0, x[:, lay.prefix:])
-            x, kv = block.prefill(x, mod, lay, ref_mask(hooks, i, lay, x.device))
+            x, kv = block.prefill(x, mod, lay, target_mask(hooks, i, 0, lay, x),
+                                  None if hooks.extra_kv is None else hooks.extra_kv.get(i))
             cache.append(kv)
         return self.head(x[:, lay.prefix:], final[:, lay.prefix:]), cache
 
@@ -344,7 +410,8 @@ class Dit(nn.Module):
         for i, (block, kv) in enumerate(zip(self.transformer_blocks, cache)):
             if hooks.target is not None:
                 x = hooks.target(i, step, x)
-            x = block.decode(x, mod, rope, kv, ref_mask(hooks, i, lay, x.device))
+            x = block.decode(x, mod, rope, kv, target_mask(hooks, i, step, lay, x),
+                             None if hooks.extra_kv is None else hooks.extra_kv.get(i))
         return self.head(x, final)
 
     def source(self, refs: Tensor, prefix_text: Tensor, lay: Layout, blocks: tp.Sequence[int]) -> dict[int, Tensor]:
@@ -361,4 +428,16 @@ class Dit(nn.Module):
                 out[i] = x[:, n:].clone()
             if i < max(blocks):
                 x = block.prefill(x, mod, lay)[0]
+        return out
+
+    def source_kv(self, refs: Tensor, prefix_text: Tensor, lay: Layout, blocks: tp.Sequence[int]) -> dict[int, KV]:
+        """Capture rotated keys and values from the source reference rows on requested blocks."""
+        rows = self.source(refs, prefix_text, lay, blocks)
+        mod, _ = self.modulate(self.time_embed(refs.new_zeros(2)), None)
+        rope = lay.rope[prefix_text.shape[1]:]
+        out = {}
+        for i, row in rows.items():
+            block = self.transformer_blocks[i]
+            _, k, v = block.attn.qkv(block._norm(row, mod[0]), rope)
+            out[i] = (k, v)
         return out

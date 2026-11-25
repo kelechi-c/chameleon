@@ -1,4 +1,4 @@
-# public: the readme, the qwen-image pipeline (src), the training script, the notebook and the space; all else private
+# public: the readme, the v1/v2 pipelines (src), the training script, the notebook, the space, and assets; all else private
 /*
 !/README.md
 !/.gitignore
@@ -9,7 +9,7 @@
 !/assets/
 /scripts/*
 !/scripts/train_head.py
-/src/chameleon/klein.py
+/src/chameleon/kfix.py
 /src/chameleon/qtok.py
 /src/chameleon/judges.py
 /src/chameleon/lora.py
@@ -18,4 +18,5 @@ __pycache__/
 *.pyc
 *.pt
 *.npy
+*.npz
 .ipynb_checkpoints/

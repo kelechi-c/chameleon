@@ -85,8 +85,34 @@ def template(prompt: str, images: int) -> str:
             f"<|im_start|>assistant\n")
 
 
-@torch.no_grad()
 def encode(encoder: tp.Any, processor: tp.Any, prompt: str, images: list[Image.Image]) -> Text:
+    """Encode the prompt and image slots into the DiT's native conditioning states."""
+    return _encode(encoder, processor, prompt, images)[0]
+
+
+def encode_with_prompt_keys(encoder: tp.Any, processor: tp.Any, prompt: str, images: list[Image.Image],
+                            prompt_chars: int | None = None) -> tuple[Text, Tensor]:
+    """Encode and select only the word tokens overlapping the original content prompt."""
+    text, ids = _encode(encoder, processor, prompt, images)
+    raw = template(prompt, len(images))
+    tokenized = processor.tokenizer(raw, add_special_tokens=False, return_offsets_mapping=True)
+    suffix = "<|im_end|>\n<|im_start|>assistant\n"
+    start = len(template("", len(images))) - len(suffix) - 1
+    end = start + (len(prompt) if prompt_chars is None else prompt_chars)
+    keys = torch.zeros(ids.numel(), dtype=torch.bool)
+    ids_cpu = ids.tolist()
+    # Image slots expand before the prompt; align its original token positions from the tail.
+    for i, (a, b) in enumerate(tokenized.offset_mapping):
+        if b > a and a < end and b > start:
+            j = i + len(ids_cpu) - len(tokenized.input_ids)
+            if j < 0 or ids_cpu[j] != tokenized.input_ids[i]:
+                raise ValueError("could not align content prompt to encoded tokens")
+            keys[j] = True
+    return text, keys.to(ids.device)
+
+
+@torch.no_grad()
+def _encode(encoder: tp.Any, processor: tp.Any, prompt: str, images: list[Image.Image]) -> tuple[Text, Tensor]:
     """Last decoder layer before the final rmsnorm, system tokens dropped, and the image-slot mask. calls the bare
     model (no lm head, no hidden-state stack)."""
     system = [{"role": "system", "content": [{"type": "text", "text": SYSTEM}]}]
@@ -101,7 +127,8 @@ def encode(encoder: tp.Any, processor: tp.Any, prompt: str, images: list[Image.I
         hidden = encoder.model(**inputs, use_cache=False).last_hidden_state
     finally:
         hook.remove()
-    return hidden[:, drop:].to(torch.bfloat16), inputs.input_ids[0, drop:] == pad
+    ids = inputs.input_ids[0, drop:]
+    return (hidden[:, drop:].to(torch.bfloat16), ids == pad), ids
 
 
 def prefix_text(text: Text) -> Tensor:
@@ -148,7 +175,7 @@ def edit(core: Core, text: Text, refs: Tensor, ref_shape: tuple[int, int] | list
     shapes = list(ref_shape) if isinstance(ref_shape, list) else [ref_shape]
     shape = out_shape or shapes[0]
     states, slots = text
-    lay = layout(slots, shapes + [shape], core.dit.cfg)
+    lay = layout(slots, shapes + [shape], core.dit.cfg, hooks)
     sig = torch.tensor([*TURBO, 0.0], device=DEV)
     levels = (sig * 1000).to(torch.bfloat16) / 1000
     lat = noise(shape, seed)
@@ -174,7 +201,7 @@ def edit_mix(core: Core, texts: list[Text], weights: list[float], refs: Tensor,
     sig = torch.tensor([*TURBO, 0.0], device=DEV)
     levels = (sig * 1000).to(torch.bfloat16) / 1000
     lat = noise(shape, seed)
-    lays = [layout(slots, shapes + [shape], core.dit.cfg) for _, slots in texts]
+    lays = [layout(slots, shapes + [shape], core.dit.cfg, hooks) for _, slots in texts]
     park = lambda c, dev: [(k.to(dev), v.to(dev)) for k, v in c] if offload else c  # noqa: E731
     caches, vs = [], []
     for (states, _), lay in zip(texts, lays):
