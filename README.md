@@ -4,7 +4,7 @@ Zero-describer `--sref` style cartridges for **FLUX.2-klein-4B** and **Qwen-Imag
 
 Takes a reference image (or an integer `--sref` seed) directly to a compact `128`-D style code `z` and a soft style token block appended after the prompt—no autoregressive describer, no DiT or LoRA weight edits.
 
-[Lab Report](https://artifacts.kelechi.cc/articles/chameleon-v2-linear-style-subspaces) · [Interactive Explainer](https://artifacts.kelechi.cc/chameleon_v2_explainer/) · Total RunPod spend: **`$1.762`**
+[Lab Report](https://artifacts.kelechi.cc/articles/chameleon-v2-linear-style-subspaces) · [Interactive Explainer](https://artifacts.kelechi.cc/chameleon_v2_explainer/) · [FLUX.2-klein HF](https://huggingface.co/tensorkelechi/flux2-klein-styleref-adapter) · [Qwen-Image 2.1 HF](https://huggingface.co/tensorkelechi/qwen21-styleref-adapter) · [Krea 2 Fix HF](https://huggingface.co/tensorkelechi/krea2-style-adapter-fix) · Total RunPod spend: **`$1.762`**
 
 ![Random --sref codes on FLUX.2-klein-4B: paired portrait and lighthouse outputs](assets/v2/klein_sref_paired.webp)
 
@@ -37,7 +37,7 @@ On the 20 MJ codes, `DINO_fed` (reference copying) stays at `.097` / `.032` (Qwe
 
 ### Krea 2 object-copying fix (`fisher k=4`)
 
-Within-style SigLIP variance (`178k`) exceeds between-style variance (`154k`), so raw RRR can leak subject geometry into the style code. Removing the top `4` Fisher within-style directions lifts held-out style retrieval (`.389` → `.456`), drops random-code cross-prompt DINO leakage (`.141` → `.087`), and improves image-to-`--sref` CSD (`+.030` `[+.004, +.055]`).
+Within-style SigLIP variance (`178k`) exceeds between-style variance (`154k`), so raw RRR can leak subject geometry into the style code. Removing the top `4` Fisher within-style directions lifts held-out style retrieval (`.389` → `.456`), drops random-code cross-prompt DINO leakage (`.141` → `.087`), and improves image-to-`--sref` CSD (`+.030` `[+.004, +.055]`). Published as [`tensorkelechi/krea2-style-adapter-fix`](https://huggingface.co/tensorkelechi/krea2-style-adapter-fix).
 
 ![Chameleon v1 vs v2 across identical styles, prompt, and photos](assets/v2/v1_vs_v2_comparison.webp)
 
@@ -47,16 +47,25 @@ Within-style SigLIP variance (`178k`) exceeds between-style variance (`154k`), s
 
 ## Quickstart
 
-Needs a CUDA GPU (`24 GB` VRAM) and `torch`, `diffusers`, `transformers`, `pillow`.
+Needs a CUDA GPU (`24 GB` VRAM) and `torch`, `diffusers`, `transformers`, `huggingface_hub`, `pillow`.
+
+Published adapters on Hugging Face:
+- **FLUX.2-klein-4B:** [`tensorkelechi/flux2-klein-styleref-adapter`](https://huggingface.co/tensorkelechi/flux2-klein-styleref-adapter) (`sref_klein.npz`, 250 MB)
+- **Qwen-Image 2.1 Turbo:** [`tensorkelechi/qwen21-styleref-adapter`](https://huggingface.co/tensorkelechi/qwen21-styleref-adapter) (`sref_qwen.npz`, 202 MB)
+- **Krea 2 (`fisher k=4` fix):** [`tensorkelechi/krea2-style-adapter-fix`](https://huggingface.co/tensorkelechi/krea2-style-adapter-fix)
 
 ### FLUX.2-klein-4B (4 steps)
 
+Weights: [`tensorkelechi/flux2-klein-styleref-adapter`](https://huggingface.co/tensorkelechi/flux2-klein-styleref-adapter)
+
 ```python
 from PIL import Image
+from huggingface_hub import hf_hub_download
 from torchvision.utils import save_image
 from chameleon import klein, sref as sr, sref_klein, style
 
-s = sr.load("sref_klein.npz", "cuda")
+weights = hf_hub_download("tensorkelechi/flux2-klein-styleref-adapter", "sref_klein.npz")
+s = sr.load(weights, "cuda")
 k = klein.load(klein.DISTILLED)
 
 # From an integer --sref code
@@ -72,13 +81,17 @@ save_image(klein.decode(k, lat, 64), "out.png")
 
 ### Qwen-Image 2.1 Turbo (8 steps)
 
+Weights: [`tensorkelechi/qwen21-styleref-adapter`](https://huggingface.co/tensorkelechi/qwen21-styleref-adapter)
+
 ```python
 from PIL import Image
+from huggingface_hub import hf_hub_download
 from chameleon import sref as sr, sref_qwen
 from chameleon.qport import model as qm
 from chameleon.qport.dit import Hooks
 
-s = sr.load("sref_qwen.npz", "cuda")
+weights = hf_hub_download("tensorkelechi/qwen21-styleref-adapter", "sref_qwen.npz")
+s = sr.load(weights, "cuda")
 enc, proc = qm.load_encoder()
 text = qm.encode(enc, proc, "a lighthouse on a rocky coast", [])
 core = qm.load_core()
@@ -94,6 +107,9 @@ qm.edit(core, edit_text, refs, [(64, 64)], seed=0,
         hooks=Hooks(style_block=sref_qwen.style_block(s, z), photo_window=(0, 13))).save("edit.png")
 ```
 
-## Licences
+## Links & Licences
 
-Fitted on [MegaStyle-1.4M](https://huggingface.co/datasets/tencent/MegaStyle-1.4M) (research / non-commercial use) and [`tensorkelechi/chameleon-style-labels`](https://huggingface.co/datasets/tensorkelechi/chameleon-style-labels). FLUX.2-klein-4B, Qwen-Image 2.1 Turbo, and the [MegaStyle encoder](https://huggingface.co/Gaojunyao/MegaStyle) are under their own licences.
+- **Adapters:** [FLUX.2-klein-4B (`sref_klein.npz`)](https://huggingface.co/tensorkelechi/flux2-klein-styleref-adapter) · [Qwen-Image 2.1 Turbo (`sref_qwen.npz`)](https://huggingface.co/tensorkelechi/qwen21-styleref-adapter) · [Krea 2 (`fisher k=4` fix)](https://huggingface.co/tensorkelechi/krea2-style-adapter-fix)
+- **Write-up & Explorer:** [Sciel Lab Report](https://artifacts.kelechi.cc/articles/chameleon-v2-linear-style-subspaces) · [Interactive Explainer](https://artifacts.kelechi.cc/chameleon_v2_explainer/)
+
+Code is **MIT**. Adapter weights are **`cc-by-nc-4.0`** (research / non-commercial use), fitted on [MegaStyle-1.4M](https://huggingface.co/datasets/tencent/MegaStyle-1.4M) and [`tensorkelechi/chameleon-style-labels`](https://huggingface.co/datasets/tensorkelechi/chameleon-style-labels). FLUX.2-klein-4B, Qwen-Image 2.1 Turbo, and the [MegaStyle encoder](https://huggingface.co/Gaojunyao/MegaStyle) are under their own licences.
