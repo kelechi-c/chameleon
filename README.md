@@ -4,6 +4,8 @@ Zero-describer `--sref` style cartridges for **FLUX.2-klein-4B** and **Qwen-Imag
 
 Takes a reference image (or an integer `--sref` seed) directly to a compact `128`-D style code `z` and a soft style token block appended after the prompt—no autoregressive describer, no DiT or LoRA weight edits.
 
+[Lab Report](https://artifacts.kelechi.cc/articles/chameleon-v2-linear-style-subspaces) · [Interactive Explainer](https://artifacts.kelechi.cc/chameleon_v2_explainer/) · Total RunPod spend: **`$1.762`**
+
 ![Random --sref codes on FLUX.2-klein-4B: paired portrait and lighthouse outputs](assets/v2/klein_sref_paired.webp)
 
 > **v1 (AR describer)** lives on the [`v1`](../../tree/v1) branch (`head_grid.pt`, Colab notebook, Gradio Space).
@@ -28,12 +30,20 @@ reference image ─► MegaStyle SigLIP (1152-d) ─► content-whitened RRR (12
 |---|---:|---:|---:|
 | 20 MJ `--sref` codes · default / nature (CSD ↑) | `.414` / `.365` | `.361` / `.364` | `.433` / `.390` |
 | 10 ceiling codes · default / nature (CSD ↑) | `.436` / `.354` | `.313` / `.329` | `.381` / `.312` |
-| Photo edit · 8 codes × 3 targets (CSD ↑ / DINO_fed ↓) | `.404` / `.085` | *pending* | – |
+| Photo edit · 8 codes × 3 photos (CSD ↑ / DINO_photo ↑ / DINO_fed ↓) | `.404` / `.741` / `.085` | `.391` / `.663` / `.121` | – |
 | Random `--sref` · within / between / gap (CSD ↑) | `.558` / `.213` / **`.345`** | `.498` / `.101` / **`.397`** | – |
 
-On the 20 MJ codes, `DINO_fed` (reference copying) stays at `.097` / `.032` (Qwen) and `.099` / `.063` (Klein), well under the `.13` copying bar, while `CLIP-T` prompt adherence holds at `.246`–`.263`. Klein photo editing is pending and will update next.
+On the 20 MJ codes, `DINO_fed` (reference copying) stays at `.097` / `.032` (Qwen) and `.099` / `.063` (Klein), well under the `.13` copying bar, while `CLIP-T` prompt adherence holds at `.246`–`.263`. On photo edits (`8 codes × 3 photos`), Klein v2 scores `.391` `[.316, .465]` CSD (`DINO_photo .663`, `DINO_fed .121`, 4 steps, `t = 10` full photo) alongside Qwen v2 (`.404`, `DINO_photo .741`, `DINO_fed .085`).
+
+### Krea 2 object-copying fix (`fisher k=4`)
+
+Within-style SigLIP variance (`178k`) exceeds between-style variance (`154k`), so raw RRR can leak subject geometry into the style code. Removing the top `4` Fisher within-style directions lifts held-out style retrieval (`.389` → `.456`), drops random-code cross-prompt DINO leakage (`.141` → `.087`), and improves image-to-`--sref` CSD (`+.030` `[+.004, +.055]`).
+
+![Chameleon v1 vs v2 across identical styles, prompt, and photos](assets/v2/v1_vs_v2_comparison.webp)
 
 ![Qwen-Image 2.1 photo restyle across 8 styles and 3 targets](assets/v2/qwen_photo_restyle.webp)
+
+![FLUX.2-klein-4B photo restyle across 8 styles and 3 targets](assets/v2/klein_photo_restyle.webp)
 
 ## Quickstart
 
